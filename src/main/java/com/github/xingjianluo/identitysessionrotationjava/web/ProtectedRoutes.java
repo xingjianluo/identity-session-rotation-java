@@ -20,6 +20,9 @@ public class ProtectedRoutes {
         // 仅认证
         routes.put("/api/auth/logout", null);
         routes.put("/api/account/password", null);
+        routes.put("/api/sessions", null);
+        routes.put("/api/sessions/revoke-others", null);
+        routes.put("/api/sessions/*/revoke", null);
         // 按权限
         routes.put("/api/profile", Permission.PROFILE_READ);
         routes.put("/api/orders", Permission.ORDER_READ);

@@ -7,6 +7,7 @@ import com.github.xingjianluo.identitysessionrotationjava.domain.RevocationReaso
 import com.github.xingjianluo.identitysessionrotationjava.domain.Session;
 import com.github.xingjianluo.identitysessionrotationjava.store.AccessTokenStore;
 import com.github.xingjianluo.identitysessionrotationjava.store.AuditStore;
+import com.github.xingjianluo.identitysessionrotationjava.store.FamilyLockStore;
 import com.github.xingjianluo.identitysessionrotationjava.store.RefreshTokenStore;
 import com.github.xingjianluo.identitysessionrotationjava.store.SessionStore;
 import java.util.LinkedHashSet;
@@ -28,46 +29,55 @@ public class SessionRevocationService {
     private final AccessTokenStore accessTokenStore;
     private final RefreshTokenStore refreshTokenStore;
     private final AuditStore auditStore;
+    private final FamilyLockStore familyLockStore;
 
     public SessionRevocationService(SessionStore sessionStore,
                                     AccessTokenStore accessTokenStore,
                                     RefreshTokenStore refreshTokenStore,
-                                    AuditStore auditStore) {
+                                    AuditStore auditStore,
+                                    FamilyLockStore familyLockStore) {
         this.sessionStore = sessionStore;
         this.accessTokenStore = accessTokenStore;
         this.refreshTokenStore = refreshTokenStore;
         this.auditStore = auditStore;
+        this.familyLockStore = familyLockStore;
     }
 
     /**
      * 撤销单条会话链（family）。幂等：重复撤销不会覆盖首次原因。
      *
+     * <p>在该 family 的互斥锁内执行，与并发刷新线性化：刷新成功后若撤销线程
+     * 先拿到锁，新签发的令牌也会被一并吊销，不存在“撤销之后刷新仍拿到可用
+     * 新令牌”的窗口。refresh 流程本身已持有同一把锁（synchronized 可重入）。
+     *
      * @return 是否发生了新的撤销（此前未被撤销）
      */
     public boolean revokeFamily(String familyId, RevocationReason reason,
                                 String username, String detail) {
-        boolean changed = false;
-        for (Session session : sessionStore.findByFamily(familyId)) {
-            if (!session.isRevoked()) {
-                session.markRevoked(reason);
-                changed = true;
+        synchronized (familyLockStore.lockFor(familyId)) {
+            boolean changed = false;
+            for (Session session : sessionStore.findByFamily(familyId)) {
+                if (!session.isRevoked()) {
+                    session.markRevoked(reason);
+                    changed = true;
+                }
             }
+            for (AccessTokenInfo token : accessTokenStore.findByFamily(familyId)) {
+                token.markRevoked();
+            }
+            for (RefreshTokenInfo token : refreshTokenStore.findByFamily(familyId)) {
+                token.markRevoked();
+            }
+            // family 级别原因：整链撤销的权威原因（优先于单会话原因，终态取首次）
+            sessionStore.markFamilyRevoked(familyId, reason);
+            if (changed) {
+                log.info("会话链撤销 familyId={} username={} reason={} detail={}",
+                        familyId, username, reason, detail);
+                auditStore.record(AuditEventType.SESSION_REVOKED, username, familyId,
+                        "reason=" + reason + (detail != null ? ", " + detail : ""));
+            }
+            return changed;
         }
-        for (AccessTokenInfo token : accessTokenStore.findByFamily(familyId)) {
-            token.markRevoked();
-        }
-        for (RefreshTokenInfo token : refreshTokenStore.findByFamily(familyId)) {
-            token.markRevoked();
-        }
-        // family 级别原因：整链撤销的权威原因（优先于单会话原因，终态取首次）
-        sessionStore.markFamilyRevoked(familyId, reason);
-        if (changed) {
-            log.info("会话链撤销 familyId={} username={} reason={} detail={}",
-                    familyId, username, reason, detail);
-            auditStore.record(AuditEventType.SESSION_REVOKED, username, familyId,
-                    "reason=" + reason + (detail != null ? ", " + detail : ""));
-        }
-        return changed;
     }
 
     /**

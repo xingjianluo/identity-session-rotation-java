@@ -3,11 +3,13 @@ package com.github.xingjianluo.identitysessionrotationjava.web;
 import com.github.xingjianluo.identitysessionrotationjava.error.AuthException;
 import com.github.xingjianluo.identitysessionrotationjava.error.ErrorCode;
 import com.github.xingjianluo.identitysessionrotationjava.service.AuthService;
+import com.github.xingjianluo.identitysessionrotationjava.service.ClientContext;
 import com.github.xingjianluo.identitysessionrotationjava.web.dto.LoginRequest;
 import com.github.xingjianluo.identitysessionrotationjava.web.dto.RefreshRequest;
 import com.github.xingjianluo.identitysessionrotationjava.web.dto.TokenPairResponse;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.ResponseEntity;
+import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -25,11 +27,18 @@ public class AuthController {
     }
 
     @PostMapping("/login")
-    public TokenPairResponse login(@RequestBody LoginRequest request) {
+    public TokenPairResponse login(@RequestBody LoginRequest request,
+                                   HttpServletRequest httpRequest) {
         if (request == null) {
             throw new AuthException(ErrorCode.BAD_REQUEST);
         }
-        return authService.login(request);
+        String forwardedFor = httpRequest.getHeader("X-Forwarded-For");
+        String ip = StringUtils.hasText(forwardedFor)
+                ? forwardedFor.split(",")[0].trim()
+                : httpRequest.getRemoteAddr();
+        ClientContext ctx = ClientContext.of(
+                request.clientId(), httpRequest.getHeader("User-Agent"), ip);
+        return authService.login(request, ctx);
     }
 
     @PostMapping("/refresh")

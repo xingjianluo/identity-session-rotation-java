@@ -5,6 +5,7 @@ import com.github.xingjianluo.identitysessionrotationjava.domain.AccessTokenInfo
 import com.github.xingjianluo.identitysessionrotationjava.domain.Account;
 import com.github.xingjianluo.identitysessionrotationjava.domain.AccountStatus;
 import com.github.xingjianluo.identitysessionrotationjava.domain.AuditEventType;
+import com.github.xingjianluo.identitysessionrotationjava.domain.DeviceSession;
 import com.github.xingjianluo.identitysessionrotationjava.domain.RefreshTokenInfo;
 import com.github.xingjianluo.identitysessionrotationjava.domain.RevocationReason;
 import com.github.xingjianluo.identitysessionrotationjava.domain.Session;
@@ -42,6 +43,7 @@ public class AuthService {
     private final AuditStore auditStore;
     private final FamilyLockStore familyLockStore;
     private final SessionRevocationService revocationService;
+    private final DeviceSessionService deviceSessionService;
     private final PasswordEncoder passwordEncoder;
     private final TokenGenerator tokenGenerator;
     private final TokenHasher tokenHasher;
@@ -54,6 +56,7 @@ public class AuthService {
                        AuditStore auditStore,
                        FamilyLockStore familyLockStore,
                        SessionRevocationService revocationService,
+                       DeviceSessionService deviceSessionService,
                        PasswordEncoder passwordEncoder,
                        TokenGenerator tokenGenerator,
                        TokenHasher tokenHasher,
@@ -65,6 +68,7 @@ public class AuthService {
         this.auditStore = auditStore;
         this.familyLockStore = familyLockStore;
         this.revocationService = revocationService;
+        this.deviceSessionService = deviceSessionService;
         this.passwordEncoder = passwordEncoder;
         this.tokenGenerator = tokenGenerator;
         this.tokenHasher = tokenHasher;
@@ -77,6 +81,17 @@ public class AuthService {
      * 真实原因只写入审计日志。
      */
     public TokenPairResponse login(LoginRequest request) {
+        return login(request, null);
+    }
+
+    /**
+     * 登录（带客户端/来源上下文）。
+     *
+     * <p>凭据校验通过后，「建立新会话链 + 登记设备 + 上限淘汰」在该账户的
+     * 账户锁内完成：并发登录不会冲破每账户活跃登录上限，被淘汰的最久未活跃
+     * 会话立即整链撤销，其令牌随后都不能再成功。
+     */
+    public TokenPairResponse login(LoginRequest request, ClientContext clientContext) {
         String username = request == null ? null : request.username();
         String password = request == null ? null : request.password();
 
@@ -114,13 +129,30 @@ public class AuthService {
             throw new AuthException(ErrorCode.INVALID_CREDENTIALS);
         }
 
-        String familyId = tokenGenerator.newId();
-        TokenPairResponse pair = issueTokenPair(account.getUsername(), familyId);
-        auditStore.record(AuditEventType.LOGIN_SUCCESS, username, familyId,
-                "session 建立");
-        log.info("登录成功 username={} familyId={} accessExpiresIn={}s",
-                username, familyId, properties.getAccessTokenTtlSeconds());
-        return pair;
+        ClientContext ctx = clientContext != null ? clientContext
+                : ClientContext.of(request.clientId(), null, null);
+
+        final TokenPairResponse[] result = new TokenPairResponse[1];
+        deviceSessionService.withAccountLock(username, () -> {
+            String familyId = tokenGenerator.newId();
+            TokenPairResponse pair = issueTokenPair(username, familyId);
+
+            Instant now = Instant.now();
+            deviceSessionService.register(new DeviceSession(
+                    familyId, username, ctx.clientId(), ctx.displayName(),
+                    ctx.userAgent(), ctx.ip(), now));
+            int evicted = deviceSessionService
+                    .enforceLimitAfterLogin(username, familyId).size();
+
+            auditStore.record(AuditEventType.LOGIN_SUCCESS, username, familyId,
+                    "session 建立, clientId=" + ctx.clientId()
+                            + ", 超限淘汰会话数=" + evicted);
+            log.info("登录成功 username={} familyId={} clientId={} 超限淘汰={} accessExpiresIn={}s",
+                    username, familyId, ctx.clientId(), evicted,
+                    properties.getAccessTokenTtlSeconds());
+            result[0] = pair;
+        });
+        return result[0];
     }
 
     /**
@@ -228,6 +260,8 @@ public class AuthService {
             auditStore.record(AuditEventType.REFRESH_SUCCESS, current.getUsername(),
                     current.getFamilyId(),
                     "轮换 session " + current.getSessionId() + " -> " + childSession.getId());
+            // 同设备刷新 = 该设备最近仍在活跃
+            deviceSessionService.touch(current.getFamilyId());
             log.info("刷新轮换成功 username={} familyId={} oldSession={} newSession={}",
                     current.getUsername(), current.getFamilyId(),
                     current.getSessionId(), childSession.getId());
@@ -290,6 +324,9 @@ public class AuthService {
             case PASSWORD_CHANGED -> ErrorCode.SESSION_REVOKED_PASSWORD_CHANGED;
             case ACCOUNT_DISABLED -> ErrorCode.SESSION_REVOKED_ACCOUNT_DISABLED;
             case REFRESH_REUSE -> ErrorCode.SESSION_REVOKED_REFRESH_REUSE;
+            case DEVICE_REVOKED -> ErrorCode.SESSION_REVOKED_DEVICE_REVOKED;
+            case OTHER_DEVICES_LOGOUT -> ErrorCode.SESSION_REVOKED_OTHER_DEVICES_LOGOUT;
+            case MAX_SESSIONS_EVICTED -> ErrorCode.SESSION_REVOKED_MAX_SESSIONS;
         };
     }
 

@@ -48,4 +48,23 @@ public class SessionStore {
     public Optional<RevocationReason> findFamilyRevocationReason(String familyId) {
         return Optional.ofNullable(familyReasons.get(familyId));
     }
+
+    /** family 是否仍然活跃（未被整链撤销）。 */
+    public boolean isFamilyActive(String familyId) {
+        return !familyReasons.containsKey(familyId);
+    }
+
+    /**
+     * 返回账户当前活跃（未整链撤销）的会话链 id，按该链首个会话的创建顺序排列。
+     * 用于多设备会话列表与每账户登录上限判定。
+     */
+    public List<String> findActiveFamiliesByUsername(String username) {
+        java.util.LinkedHashSet<String> ordered = new java.util.LinkedHashSet<>();
+        for (Session s : all) {
+            if (s.getUsername().equals(username) && isFamilyActive(s.getFamilyId())) {
+                ordered.add(s.getFamilyId());
+            }
+        }
+        return List.copyOf(ordered);
+    }
 }

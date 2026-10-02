@@ -14,6 +14,9 @@ public class SecurityProperties {
     /** 刷新令牌有效期（秒）。 */
     private long refreshTokenTtlSeconds = 1209600;
 
+    /** 每个账户允许同时保持的活跃登录（设备会话）数上限。 */
+    private int maxConcurrentSessions = 5;
+
     /** 令牌签发者标识。 */
     private String issuer = "local-identity";
 
@@ -25,6 +28,9 @@ public class SecurityProperties {
 
     public long getRefreshTokenTtlSeconds() { return refreshTokenTtlSeconds; }
     public void setRefreshTokenTtlSeconds(long v) { this.refreshTokenTtlSeconds = v; }
+
+    public int getMaxConcurrentSessions() { return maxConcurrentSessions; }
+    public void setMaxConcurrentSessions(int v) { this.maxConcurrentSessions = v; }
 
     public String getIssuer() { return issuer; }
     public void setIssuer(String issuer) { this.issuer = issuer; }

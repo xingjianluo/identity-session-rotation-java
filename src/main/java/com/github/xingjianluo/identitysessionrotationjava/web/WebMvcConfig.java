@@ -20,6 +20,9 @@ public class WebMvcConfig implements WebMvcConfigurer {
                 .addPathPatterns(
                         "/api/auth/logout",
                         "/api/account/password",
+                        "/api/sessions",
+                        "/api/sessions/revoke-others",
+                        "/api/sessions/*/revoke",
                         "/api/profile",
                         "/api/orders",
                         "/api/admin/**")

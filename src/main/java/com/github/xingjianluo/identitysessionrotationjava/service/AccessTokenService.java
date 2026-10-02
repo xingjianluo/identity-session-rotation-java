@@ -43,17 +43,20 @@ public class AccessTokenService {
     private final AccountStore accountStore;
     private final AuditStore auditStore;
     private final TokenHasher tokenHasher;
+    private final DeviceSessionService deviceSessionService;
 
     public AccessTokenService(AccessTokenStore accessTokenStore,
                               SessionStore sessionStore,
                               AccountStore accountStore,
                               AuditStore auditStore,
-                              TokenHasher tokenHasher) {
+                              TokenHasher tokenHasher,
+                              DeviceSessionService deviceSessionService) {
         this.accessTokenStore = accessTokenStore;
         this.sessionStore = sessionStore;
         this.accountStore = accountStore;
         this.auditStore = auditStore;
         this.tokenHasher = tokenHasher;
+        this.deviceSessionService = deviceSessionService;
     }
 
     /** 纯判定（不抛异常），便于过滤器与单测复用。 */
@@ -115,6 +118,8 @@ public class AccessTokenService {
 
         log.info("授权通过 username={} familyId={} sessionId={} required={}",
                 info.getUsername(), info.getFamilyId(), info.getSessionId(), required);
+        // 成功访问 = 该设备最近活跃（用于超限淘汰的 LRU 判定）
+        deviceSessionService.touch(info.getFamilyId());
         return new AccessDecision(true, null, "allowed", info.getUsername(),
                 info.getFamilyId(), info.getSessionId());
     }
@@ -150,6 +155,9 @@ public class AccessTokenService {
             case PASSWORD_CHANGED -> ErrorCode.SESSION_REVOKED_PASSWORD_CHANGED;
             case ACCOUNT_DISABLED -> ErrorCode.SESSION_REVOKED_ACCOUNT_DISABLED;
             case REFRESH_REUSE -> ErrorCode.SESSION_REVOKED_REFRESH_REUSE;
+            case DEVICE_REVOKED -> ErrorCode.SESSION_REVOKED_DEVICE_REVOKED;
+            case OTHER_DEVICES_LOGOUT -> ErrorCode.SESSION_REVOKED_OTHER_DEVICES_LOGOUT;
+            case MAX_SESSIONS_EVICTED -> ErrorCode.SESSION_REVOKED_MAX_SESSIONS;
         };
     }
 
