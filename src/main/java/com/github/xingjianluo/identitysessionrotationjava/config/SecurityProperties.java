@@ -17,6 +17,9 @@ public class SecurityProperties {
     /** 令牌签发者标识。 */
     private String issuer = "local-identity";
 
+    /** 每个账号允许同时保持的活跃登录（设备会话）数上限，超出后按最久未活动淘汰。 */
+    private int maxActiveSessionsPerAccount = 5;
+
     /** 启动时初始化的演示账户。 */
     private List<BootstrapAccount> bootstrapAccounts = new ArrayList<>();
 
@@ -28,6 +31,9 @@ public class SecurityProperties {
 
     public String getIssuer() { return issuer; }
     public void setIssuer(String issuer) { this.issuer = issuer; }
+
+    public int getMaxActiveSessionsPerAccount() { return maxActiveSessionsPerAccount; }
+    public void setMaxActiveSessionsPerAccount(int v) { this.maxActiveSessionsPerAccount = v; }
 
     public List<BootstrapAccount> getBootstrapAccounts() { return bootstrapAccounts; }
     public void setBootstrapAccounts(List<BootstrapAccount> v) { this.bootstrapAccounts = v; }

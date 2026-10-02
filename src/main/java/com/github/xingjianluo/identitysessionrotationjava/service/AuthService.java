@@ -14,6 +14,7 @@ import com.github.xingjianluo.identitysessionrotationjava.security.PasswordEncod
 import com.github.xingjianluo.identitysessionrotationjava.security.TokenGenerator;
 import com.github.xingjianluo.identitysessionrotationjava.security.TokenHasher;
 import com.github.xingjianluo.identitysessionrotationjava.store.AccessTokenStore;
+import com.github.xingjianluo.identitysessionrotationjava.store.AccountLockStore;
 import com.github.xingjianluo.identitysessionrotationjava.store.AuditStore;
 import com.github.xingjianluo.identitysessionrotationjava.store.FamilyLockStore;
 import com.github.xingjianluo.identitysessionrotationjava.store.RefreshTokenStore;
@@ -41,7 +42,9 @@ public class AuthService {
     private final RefreshTokenStore refreshTokenStore;
     private final AuditStore auditStore;
     private final FamilyLockStore familyLockStore;
+    private final AccountLockStore accountLockStore;
     private final SessionRevocationService revocationService;
+    private final DeviceSessionService deviceSessionService;
     private final PasswordEncoder passwordEncoder;
     private final TokenGenerator tokenGenerator;
     private final TokenHasher tokenHasher;
@@ -53,7 +56,9 @@ public class AuthService {
                        RefreshTokenStore refreshTokenStore,
                        AuditStore auditStore,
                        FamilyLockStore familyLockStore,
+                       AccountLockStore accountLockStore,
                        SessionRevocationService revocationService,
+                       DeviceSessionService deviceSessionService,
                        PasswordEncoder passwordEncoder,
                        TokenGenerator tokenGenerator,
                        TokenHasher tokenHasher,
@@ -64,7 +69,9 @@ public class AuthService {
         this.refreshTokenStore = refreshTokenStore;
         this.auditStore = auditStore;
         this.familyLockStore = familyLockStore;
+        this.accountLockStore = accountLockStore;
         this.revocationService = revocationService;
+        this.deviceSessionService = deviceSessionService;
         this.passwordEncoder = passwordEncoder;
         this.tokenGenerator = tokenGenerator;
         this.tokenHasher = tokenHasher;
@@ -114,13 +121,21 @@ public class AuthService {
             throw new AuthException(ErrorCode.INVALID_CREDENTIALS);
         }
 
-        String familyId = tokenGenerator.newId();
-        TokenPairResponse pair = issueTokenPair(account.getUsername(), familyId);
-        auditStore.record(AuditEventType.LOGIN_SUCCESS, username, familyId,
-                "session 建立");
-        log.info("登录成功 username={} familyId={} accessExpiresIn={}s",
-                username, familyId, properties.getAccessTokenTtlSeconds());
-        return pair;
+        // 同账号串行化：登记新登录 + 超限淘汰作为一个整体，并发登录不会冲破上限
+        synchronized (accountLockStore.lockFor(account.getUsername())) {
+            String familyId = tokenGenerator.newId();
+            TokenPairResponse pair = issueTokenPair(account.getUsername(), familyId);
+            deviceSessionService.registerLogin(account.getUsername(), familyId,
+                    request.client());
+            deviceSessionService.enforceLimit(account.getUsername());
+            auditStore.record(AuditEventType.LOGIN_SUCCESS, username, familyId,
+                    "session 建立, client=" + (request.client() == null ? "unknown"
+                            : request.client()));
+            log.info("登录成功 username={} familyId={} client={} accessExpiresIn={}s",
+                    username, familyId, request.client(),
+                    properties.getAccessTokenTtlSeconds());
+            return pair;
+        }
     }
 
     /**
@@ -228,6 +243,7 @@ public class AuthService {
             auditStore.record(AuditEventType.REFRESH_SUCCESS, current.getUsername(),
                     current.getFamilyId(),
                     "轮换 session " + current.getSessionId() + " -> " + childSession.getId());
+            deviceSessionService.touch(current.getFamilyId());
             log.info("刷新轮换成功 username={} familyId={} oldSession={} newSession={}",
                     current.getUsername(), current.getFamilyId(),
                     current.getSessionId(), childSession.getId());
@@ -290,6 +306,8 @@ public class AuthService {
             case PASSWORD_CHANGED -> ErrorCode.SESSION_REVOKED_PASSWORD_CHANGED;
             case ACCOUNT_DISABLED -> ErrorCode.SESSION_REVOKED_ACCOUNT_DISABLED;
             case REFRESH_REUSE -> ErrorCode.SESSION_REVOKED_REFRESH_REUSE;
+            case DEVICE_REVOKED -> ErrorCode.SESSION_REVOKED_BY_USER;
+            case SESSION_LIMIT_EVICTED -> ErrorCode.SESSION_REVOKED_EVICTED;
         };
     }
 
