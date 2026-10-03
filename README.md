@@ -125,10 +125,32 @@ family = 一个“设备登录”**（`DeviceSession`），对外的稳定标识
 
 **同时在线数上限与淘汰**：每个账号允许保持的活跃登录数由
 `app.security.max-active-sessions-per-account` 配置（默认 5）。登录时「建立新登录 +
-超限淘汰」在**该账号的互斥锁**内完成，因此多个客户端同时登录也不会冲破上限。超出上限
-时按**最久未活动最先清掉**（`last_active_at` 升序；并列按登录时间、再按 familyId，
-结果可预期）撤销多余登录，被淘汰登录的令牌全部失效，判定为
-`session_revoked_evicted`，同样可与自然过期区分。
+超限淘汰」在**该账号的互斥锁**内完成；其他设备的成功访问/刷新对 `last_active_at` 的
+更新同样在该账号锁内进行，因此多个客户端同时登录、且期间还有客户端不停访问/刷新时，
+活跃数既不会冲破上限，淘汰排序快照也不会在登录窗口内被并发活动改写。
+
+淘汰规则（结果稳定、可解释）：
+
+- **触发本次淘汰的新登录永远保留**：刚登录成功、已经拿到令牌的设备，绝不会被它自己
+  触发的那次淘汰清掉，登录返回后令牌立即可用。被清掉的只能是**本次登录之前就已经
+  存在**的登录。（一个登录可以被**之后的**新登录按 LRU 淘汰，但永远不会被自己淘汰。）
+- 超出上限时，从既有登录中按**最久未活动最先清掉**（`last_active_at` 升序；并列按
+  登录时间、再按 familyId）撤销多余登录，被淘汰登录的令牌全部失效，判定为
+  `session_revoked_evicted`，同样可与自然过期区分。
+
+**上限取边界值时的行为**：配置值 `<= 0`（例如 0）或小于当前活跃数时，有效上限按
+`max(1, 配置值)` 解释——**每次登录后至少保留刚登录成功的那一个**，不会出现“每个设备
+都登录成功、但拿到的令牌立刻全部失效”：
+
+| 配置/场景 | 登录后行为 |
+|---|---|
+| `max = 0`（或负数） | 有效上限按 1：仅保留刚登录的这 1 个，此前的活跃登录全部按 LRU 清掉 |
+| `max = 2`，当前已有 3 个活跃 | 新登录保留，从既有登录中清掉 `3 + 1 - 2 = 2` 个最久未活动者，总数收敛到 2 |
+| `max >= 当前活跃数 + 1` | 不淘汰，全部保留 |
+
+收敛只发生在**下一次登录**时；单纯调小配置不会主动踢人（没有新登录就没有淘汰动作）。
+被清掉的登录统一得到 `session_revoked_evicted`，审计事件 `SESSION_EVICTED_LIMIT` 的
+`detail` 中同时记录 `configuredMax`（配置值）与 `effectiveMax`（实际生效值）。
 
 **撤销与并发刷新的对齐**：撤销与刷新共用同一把 family 锁。撤销返回后，该 family 上
 正在进行的刷新要么已经完成（其新签发的令牌随后被撤销一并覆盖）、要么进入锁后看到
@@ -241,7 +263,7 @@ detail`，`detail` 中给出内部判定依据（如 `reason=bad_password`、
 | `app.security.access-token-ttl-seconds` | `300` | 访问令牌有效期（秒） |
 | `app.security.refresh-token-ttl-seconds` | `1209600` | 刷新令牌有效期（秒，14 天） |
 | `app.security.issuer` | `local-identity` | 签发者标识 |
-| `app.security.max-active-sessions-per-account` | `5` | 每账号同时在线的活跃登录数上限，超出按最久未活动淘汰 |
+| `app.security.max-active-sessions-per-account` | `5` | 每账号同时在线的活跃登录数上限，超出按最久未活动淘汰；**新登录豁免**（不会被自己触发的淘汰清掉）；配置 `<=0` 时有效上限按 1 解释 |
 | `app.security.bootstrap-accounts[i].username` | — | 启动演示账户名 |
 | `app.security.bootstrap-accounts[i].password` | — | 启动演示账户明文口令（仅本地） |
 | `app.security.bootstrap-accounts[i].roles[j]` | — | 角色：`USER` / `ADMIN` |
@@ -256,7 +278,7 @@ detail`，`detail` 中给出内部判定依据（如 `reason=bad_password`、
 ### 7.1 构建与测试
 
 ```bash
-mvn clean test          # 运行全部 24 个测试
+mvn clean test          # 运行全部 28 个测试
 mvn spring-boot:run     # 启动服务（默认 8080）
 ```
 
@@ -265,8 +287,33 @@ mvn spring-boot:run     # 启动服务（默认 8080）
 过期与撤销可区分、HTTP 全链路错误码与审计查询；多设备部分覆盖：会话查看（客户端
 标识与登录/最近活跃时间）、单会话撤销的隔离效果、退出其他设备、超限淘汰顺序
 （最久未活动先清）、撤销与并发刷新叠加（撤销后换不到可用新令牌）、并发登录下的
-上限保持（8 并发登录、上限 3、恰好淘汰 5）。可在 `target/surefire-reports/` 及控制台
-查看“[输入]/[覆盖]/[判定依据]”日志与各用例通过情况。
+上限保持（8 并发登录、上限 3、恰好淘汰 5）；本次新增 `DeviceSessionEvictionConcurrencyTests`
+（上限 3，4 个用例）专门压测淘汰缺陷与边界：
+
+- `newLoginIsNeverEvictedWhileOldDevicesAreActive`：3 个老设备在新登录的「登记 →
+  淘汰」窗口内持续高频访问（每轮数千次），连续 12 轮断言**新登录返回后立刻访问/刷新
+  必须可用且存活**，活跃数恒为 3，被清的只能是老登录；
+- `interleavedLoginsAndActivitySettleDeterministically`：3 个老设备后台不停访问，
+  同时 5 个新客户端屏障后并发登录，**每个登录线程在 `login()` 返回的第一时间就使用
+  令牌**，另有一个处于活动窗口内的探针登录；连续 6 轮断言新登录全部立即可用、
+  活跃数恒不超过 3、被清方唯一原因为 `session_revoked_evicted`；
+- `limitShrunkBelowCurrentCountConvergesOnNextLogin`：已有 3 个活跃登录时把上限
+  动态调为 2，再登录 → 新登录保留可用、总数收敛到 2，被清的是最久未活动的既有登录；
+- `limitZeroKeepsOnlyTheJustLoggedInDevice`：上限配成 0 → 有效上限按 1，仅刚登录的
+  那 1 个存活可用（访问 + 刷新都健康），既有登录全部以 `session_revoked_evicted`
+  失效；再登录一次，上一个“新登录”此刻作为既有登录被清，行为稳定可解释。
+
+> 这两个并发用例在修复前可以稳定复现缺陷（未修复代码上连续运行均失败：新登录第一时间
+> 使用即得到 `session_revoked_evicted`；`max=0` 时活跃数直接归零），修复后稳定通过。
+> 可在 `target/surefire-reports/` 及控制台查看“[输入]/[覆盖]/[判定依据]”日志与各用例
+> 通过情况，例如：
+>
+> ```bash
+> # 只跑淘汰并发与边界用例，观察 [覆盖]/[判定依据] 日志
+> mvn test -Dtest=DeviceSessionEvictionConcurrencyTests
+> # 跑多设备全部用例
+> mvn test -Dtest='DeviceSession*'
+> ```
 
 ### 7.2 手动 curl 走查
 
@@ -325,8 +372,15 @@ curl -s -X POST localhost:8080/api/sessions/revoke-others \
   -H "Authorization: Bearer $ACCESS"
 
 # 5) 上限验证：把 app.security.max-active-sessions-per-account 调小（如 2），
-#    第 3 个客户端登录后，最久未活动的登录再访问会得到
-#    401 session_revoked_evicted（与自然过期 token_expired 明显不同）
+#    第 3 个客户端登录后，最久未活动的“既有登录”再访问会得到
+#    401 session_revoked_evicted（与自然过期 token_expired 明显不同）；
+#    而第 3 个客户端自己（触发淘汰的新登录）登录返回后立即访问是成功的，
+#    它只会被“之后的登录”淘汰，不会被自己淘汰。
+#
+# 6) 边界验证：把上限配成 0（<=0 时有效上限按 1）：
+#    每次新登录后只有刚登录的 1 个设备可用，此前的登录全部得到
+#    401 session_revoked_evicted，绝不会出现“登录成功但令牌立刻集体失效”。
+#    审计 SESSION_EVICTED_LIMIT 的 detail 里可看到 configuredMax=0, effectiveMax=1。
 ```
 
 ### 7.4 并发刷新复现

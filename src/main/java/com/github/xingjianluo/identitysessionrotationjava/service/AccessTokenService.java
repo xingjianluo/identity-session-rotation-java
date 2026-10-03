@@ -13,7 +13,6 @@ import com.github.xingjianluo.identitysessionrotationjava.security.TokenHasher;
 import com.github.xingjianluo.identitysessionrotationjava.store.AccessTokenStore;
 import com.github.xingjianluo.identitysessionrotationjava.store.AccountStore;
 import com.github.xingjianluo.identitysessionrotationjava.store.AuditStore;
-import com.github.xingjianluo.identitysessionrotationjava.store.DeviceSessionStore;
 import com.github.xingjianluo.identitysessionrotationjava.store.SessionStore;
 import java.time.Instant;
 import org.slf4j.Logger;
@@ -44,20 +43,20 @@ public class AccessTokenService {
     private final AccountStore accountStore;
     private final AuditStore auditStore;
     private final TokenHasher tokenHasher;
-    private final DeviceSessionStore deviceSessionStore;
+    private final DeviceSessionService deviceSessionService;
 
     public AccessTokenService(AccessTokenStore accessTokenStore,
                               SessionStore sessionStore,
                               AccountStore accountStore,
                               AuditStore auditStore,
                               TokenHasher tokenHasher,
-                              DeviceSessionStore deviceSessionStore) {
+                              DeviceSessionService deviceSessionService) {
         this.accessTokenStore = accessTokenStore;
         this.sessionStore = sessionStore;
         this.accountStore = accountStore;
         this.auditStore = auditStore;
         this.tokenHasher = tokenHasher;
-        this.deviceSessionStore = deviceSessionStore;
+        this.deviceSessionService = deviceSessionService;
     }
 
     /** 纯判定（不抛异常），便于过滤器与单测复用。 */
@@ -119,10 +118,9 @@ public class AccessTokenService {
 
         log.info("授权通过 username={} familyId={} sessionId={} required={}",
                 info.getUsername(), info.getFamilyId(), info.getSessionId(), required);
-        // 访问成功即视为该设备登录的一次活动，刷新“最近活跃时间”
-        deviceSessionStore.findByFamilyId(info.getFamilyId())
-                .filter(ds -> ds.isActive())
-                .ifPresent(ds -> ds.touch(Instant.now()));
+        // 访问成功即视为该设备登录的一次活动：在账号锁内刷新“最近活跃时间”，
+        // 与登录的淘汰窗口互斥，保证并发访问不会把刚登录的设备推到淘汰队首
+        deviceSessionService.touch(info.getUsername(), info.getFamilyId());
         return new AccessDecision(true, null, "allowed", info.getUsername(),
                 info.getFamilyId(), info.getSessionId());
     }

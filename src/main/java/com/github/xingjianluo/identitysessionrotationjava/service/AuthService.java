@@ -127,7 +127,9 @@ public class AuthService {
             TokenPairResponse pair = issueTokenPair(account.getUsername(), familyId);
             deviceSessionService.registerLogin(account.getUsername(), familyId,
                     request.client());
-            deviceSessionService.enforceLimit(account.getUsername());
+            // 本次新登录（familyId）在淘汰中豁免：只有此前已存在的登录会被清掉，
+            // 因此登录返回后该令牌对立即可用，即便其他设备正在并发访问/刷新
+            deviceSessionService.enforceLimit(account.getUsername(), familyId);
             auditStore.record(AuditEventType.LOGIN_SUCCESS, username, familyId,
                     "session 建立, client=" + (request.client() == null ? "unknown"
                             : request.client()));
@@ -165,6 +167,8 @@ public class AuthService {
         }
 
         // 同链串行化：保证并发刷新线性化
+        TokenPairResponse pair;
+        String username;
         synchronized (familyLockStore.lockFor(oldToken.getFamilyId())) {
             RefreshTokenInfo current = refreshTokenStore.findByHash(tokenHash).orElseThrow();
 
@@ -230,7 +234,7 @@ public class AuthService {
                     current.getUsername(), Instant.now());
             sessionStore.save(childSession);
 
-            TokenPairResponse pair = issueTokenPair(current.getUsername(),
+            TokenPairResponse issued = issueTokenPair(current.getUsername(),
                     current.getFamilyId(), childSession.getId());
 
             // 撤销旧会话本身（链保留，新会话接管），旧访问令牌随之失效
@@ -243,12 +247,16 @@ public class AuthService {
             auditStore.record(AuditEventType.REFRESH_SUCCESS, current.getUsername(),
                     current.getFamilyId(),
                     "轮换 session " + current.getSessionId() + " -> " + childSession.getId());
-            deviceSessionService.touch(current.getFamilyId());
+            pair = issued;
+            username = current.getUsername();
             log.info("刷新轮换成功 username={} familyId={} oldSession={} newSession={}",
                     current.getUsername(), current.getFamilyId(),
                     current.getSessionId(), childSession.getId());
-            return pair;
         }
+        // 活跃时间更新放在 family 锁之外、账号锁之内完成，保持与登录路径一致的
+        // 锁序（account → family），避免与登录的淘汰流程形成锁序反转死锁
+        deviceSessionService.touch(username, oldToken.getFamilyId());
+        return pair;
     }
 
     /** 登出：撤销当前访问令牌所在的整条会话链，刷新令牌同时失效。 */

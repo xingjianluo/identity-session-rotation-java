@@ -17,7 +17,13 @@ public class SecurityProperties {
     /** 令牌签发者标识。 */
     private String issuer = "local-identity";
 
-    /** 每个账号允许同时保持的活跃登录（设备会话）数上限，超出后按最久未活动淘汰。 */
+    /**
+     * 每个账号允许同时保持的活跃登录（设备会话）数上限，超出后按最久未活动淘汰。
+     *
+     * <p>触发淘汰的那次新登录豁免：它不会被自己触发的淘汰清掉，被清掉的只能是
+     * 此前已存在的登录。配置为 {@code <=0} 时有效上限按 1 解释（每次至少保留
+     * 刚登录成功的那一个）。
+     */
     private int maxActiveSessionsPerAccount = 5;
 
     /** 启动时初始化的演示账户。 */
