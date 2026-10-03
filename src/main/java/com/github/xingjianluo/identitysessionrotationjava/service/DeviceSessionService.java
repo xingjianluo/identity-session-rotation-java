@@ -108,15 +108,32 @@ public class DeviceSessionService {
      * 登录数上限淘汰：活跃登录数超过配置上限时，按“最久未活动最先清掉”
      * 撤销多余部分（并列按登录时间、familyId 确定次序，结果可预期）。
      *
+     * <p>新登录保护语义：触发本次淘汰的登录（protectedFamilyId）永远保留，
+     * 淘汰候选只取本次登录之前就已存在的登录。否则并发场景下其他设备的
+     * 访问/刷新（touch 不持有账号锁）会把已有登录的最近活跃时间刷到
+     * 新登录登记时间之后，使刚登录成功的会话被误判为“最久未活动”而立即
+     * 被清掉。
+     *
+     * <p>上限边界：当上限为 0 或小于当前活跃数时，实际保留数下限为 1——
+     * 即刚登录成功的这一个始终可用，被清掉的只是它之前的登录。
+     *
      * <p>调用方必须持有该账号的互斥锁（见 AuthService 登录流程），
      * 以保证并发登录不会冲破上限。
      */
-    public void enforceLimit(String username) {
+    public void enforceLimit(String username, String protectedFamilyId) {
         int max = properties.getMaxActiveSessionsPerAccount();
         List<DeviceSession> active = deviceSessionStore.findActiveByUsername(username);
         int excess = active.size() - max;
-        for (int i = 0; i < excess; i++) {
-            DeviceSession victim = active.get(i);
+        if (excess <= 0) {
+            return;
+        }
+        // 候选只含本次登录之前已存在的登录；受保护的新登录不参与淘汰
+        List<DeviceSession> candidates = active.stream()
+                .filter(s -> !s.getFamilyId().equals(protectedFamilyId))
+                .toList();
+        int toEvict = Math.min(excess, candidates.size());
+        for (int i = 0; i < toEvict; i++) {
+            DeviceSession victim = candidates.get(i);
             revocationService.revokeFamily(victim.getFamilyId(),
                     RevocationReason.SESSION_LIMIT_EVICTED, username,
                     "超出同时在线上限 max=" + max + ", 淘汰最久未活动登录 client="

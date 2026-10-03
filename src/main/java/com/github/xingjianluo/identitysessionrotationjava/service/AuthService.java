@@ -121,13 +121,15 @@ public class AuthService {
             throw new AuthException(ErrorCode.INVALID_CREDENTIALS);
         }
 
-        // 同账号串行化：登记新登录 + 超限淘汰作为一个整体，并发登录不会冲破上限
+        // 同账号串行化：登记新登录 + 超限淘汰作为一个整体，并发登录不会冲破上限；
+        // 淘汰以保护本次新登录为前提（只清掉此前已存在的登录），
+        // 避免并发访问/刷新把新登录误判为“最久未活动”而立即清掉
         synchronized (accountLockStore.lockFor(account.getUsername())) {
             String familyId = tokenGenerator.newId();
             TokenPairResponse pair = issueTokenPair(account.getUsername(), familyId);
             deviceSessionService.registerLogin(account.getUsername(), familyId,
                     request.client());
-            deviceSessionService.enforceLimit(account.getUsername());
+            deviceSessionService.enforceLimit(account.getUsername(), familyId);
             auditStore.record(AuditEventType.LOGIN_SUCCESS, username, familyId,
                     "session 建立, client=" + (request.client() == null ? "unknown"
                             : request.client()));
